@@ -12,7 +12,7 @@
 
 import dataclasses
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict, fields
 from typing import Any
 from typing import Dict
 from typing import List
@@ -28,37 +28,37 @@ from apache_beam.yaml.main import build_pipeline_components_from_yaml
 
 @dataclass
 class NodeData:
-  id: str
-  label: str
-  type: str = ""
+    id: str
+    label: str
+    type: str = ""
 
-  def __post_init__(self):
-    # Ensure ID is not empty
-    if not self.id:
-      raise ValueError("Node ID cannot be empty")
+    def __post_init__(self):
+        # Ensure ID is not empty
+        if not self.id:
+            raise ValueError("Node ID cannot be empty")
 
 
 @dataclass
 class EdgeData:
-  source: str
-  target: str
-  label: str = ""
+    source: str
+    target: str
+    label: str = ""
 
-  def __post_init__(self):
-    if not self.source or not self.target:
-      raise ValueError("Edge source and target cannot be empty")
+    def __post_init__(self):
+        if not self.source or not self.target:
+            raise ValueError("Edge source and target cannot be empty")
 
 
 class FlowGraph(TypedDict):
-  nodes: List[Dict[str, Any]]
-  edges: List[Dict[str, Any]]
+    nodes: List[Dict[str, Any]]
+    edges: List[Dict[str, Any]]
 
 
 # ======================== Main Function ========================
 
 
 def parse_beam_yaml(yaml_str: str, isDryRunMode: bool = False) -> str:
-  """
+    """
     Parse Beam YAML and convert to flow graph data structure
     
     Args:
@@ -69,94 +69,118 @@ def parse_beam_yaml(yaml_str: str, isDryRunMode: bool = False) -> str:
         - Success: {'status': 'success', 'data': {...}, 'error': None}
         - Failure: {'status': 'error', 'data': None, 'error': 'message'}
     """
-  # Phase 1: YAML Parsing
-  try:
-    parsed_yaml = yaml.safe_load(yaml_str)
-    if not parsed_yaml or 'pipeline' not in parsed_yaml:
-      return build_error_response(
-          "Invalid YAML structure: missing 'pipeline' section")
-  except yaml.YAMLError as e:
-    return build_error_response(f"YAML parsing error: {str(e)}")
+    # Phase 1: YAML Parsing
+    try:
+        parsed_yaml = yaml.safe_load(yaml_str)
+        if not parsed_yaml or 'pipeline' not in parsed_yaml:
+            return build_error_response(
+                "Invalid YAML structure: missing 'pipeline' section")
+    except yaml.YAMLError as e:
+        return build_error_response(f"YAML parsing error: {str(e)}")
 
-  # Phase 2: Pipeline Validation
-  try:
-    options, constructor = build_pipeline_components_from_yaml(
-        yaml_str,
-        [],
-        validate_schema='per_transform'
-    )
-    if isDryRunMode:
-      with beam.Pipeline(options=options) as p:
-        constructor(p)
-  except Exception as e:
-    return build_error_response(f"Pipeline validation failed: {str(e)}")
+    # Phase 2: Pipeline Validation
+    try:
+        options, constructor = build_pipeline_components_from_yaml(
+            yaml_str, [], validate_schema='per_transform')
+        if isDryRunMode:
+            with beam.Pipeline(options=options) as p:
+                constructor(p)
+    except Exception as e:
+        return build_error_response(f"Pipeline validation failed: {str(e)}")
 
-  # Phase 3: Graph Construction
-  try:
-    pipeline = parsed_yaml['pipeline']
-    transforms = pipeline.get('transforms', [])
+    # Phase 3: Graph Construction
+    try:
+        pipeline = parsed_yaml['pipeline']
+        transforms = pipeline.get('transforms', [])
 
-    nodes: List[NodeData] = []
-    edges: List[EdgeData] = []
+        nodes: List[NodeData] = []
+        edges: List[EdgeData] = []
 
-    nodes.append(NodeData(id='0', label='Input', type='input'))
-    nodes.append(NodeData(id='1', label='Output', type='output'))
+        nodes.append(NodeData(id='0', label='Input', type='input'))
+        nodes.append(NodeData(id='1', label='Output', type='output'))
 
-    # Process transform nodes
-    for idx, transform in enumerate(transforms):
-      if not isinstance(transform, dict):
-        continue
+        # Process transform nodes
+        for idx, transform in enumerate(transforms):
+            if not isinstance(transform, dict):
+                continue
 
-      payload = {k: v for k, v in transform.items() if k not in {"type"}}
+            node_id = f"t{idx}"
 
-      node_id = f"t{idx}"
-      node_data = NodeData(
-          id=node_id,
-          label=transform.get('type', 'unnamed'),
-          type='default',
-          **payload)
-      nodes.append(node_data)
+            # 分离预定义字段和额外字段
+            predefined_fields = {f.name for f in fields(NodeData)}
+            extra_args = {}
 
-      # Create connections between nodes
-      if idx > 0:
-        edges.append(
-            EdgeData(source=f"t{idx-1}", target=node_id, label='chain'))
+            for key, value in transform.items():
+                if key not in predefined_fields:
+                    extra_args[key] = value
 
-    if transforms:
-      edges.append(EdgeData(source='0', target='t0', label='start'))
-      edges.append(EdgeData(source=node_id, target='1', label='stop'))
+            # 创建节点实例
+            node_data = NodeData(id=node_id,
+                                 label=transform.get('type', 'unnamed'),
+                                 type='default')
 
-    def to_dict(node):
-      if hasattr(node, '__dataclass_fields__'):
-        return dataclasses.asdict(node)
-      return node
+            # 添加额外字段
+            for key, value in extra_args.items():
+                setattr(node_data, key, value)
 
-    nodes_serializable = [to_dict(n) for n in nodes]
+            nodes.append(node_data)
 
-    return build_success_response(
-        nodes=nodes_serializable, edges=[dataclasses.asdict(e) for e in edges])
+            # Create connections between nodes
+            if idx > 0:
+                edges.append(
+                    EdgeData(source=f"t{idx-1}", target=node_id,
+                             label='chain'))
 
-  except Exception as e:
-    return build_error_response(f"Graph construction failed: {str(e)}")
+        if transforms:
+            edges.append(EdgeData(source='0', target='t0', label='start'))
+            edges.append(EdgeData(source=node_id, target='1', label='stop'))
+
+        def to_dict(obj):
+            if hasattr(obj, '__dataclass_fields__'):
+                result = asdict(obj)
+                # 添加动态字段
+                for attr_name in dir(obj):
+                    if not attr_name.startswith(
+                            '_') and attr_name not in result:
+                        attr_value = getattr(obj, attr_name)
+                        if not callable(attr_value):
+                            result[attr_name] = attr_value
+                return result
+            return obj
+
+        nodes_serializable = [to_dict(n) for n in nodes]
+
+        return build_success_response(
+            nodes=nodes_serializable,
+            edges=[dataclasses.asdict(e) for e in edges])
+
+    except Exception as e:
+        return build_error_response(f"Graph construction failed: {str(e)}")
 
 
 # ======================== Utility Functions ========================
 
 
-def build_success_response(
-    nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> str:
-  """Build success response"""
-  return json.dumps({'data': {'nodes': nodes, 'edges': edges}, 'error': None})
+def build_success_response(nodes: List[Dict[str, Any]],
+                           edges: List[Dict[str, Any]]) -> str:
+    """Build success response"""
+    return json.dumps({
+        'data': {
+            'nodes': nodes,
+            'edges': edges
+        },
+        'error': None
+    })
 
 
 def build_error_response(error_msg: str) -> str:
-  """Build error response"""
-  return json.dumps({'data': None, 'error': error_msg})
+    """Build error response"""
+    return json.dumps({'data': None, 'error': error_msg})
 
 
 if __name__ == "__main__":
-  # Example usage
-  example_yaml = """
+    # Example usage
+    example_yaml = """
 pipeline:
   transforms:
     - type: ReadFromCsv
@@ -172,5 +196,5 @@ pipeline:
       input: [A, B]
     """
 
-  response = parse_beam_yaml(example_yaml, isDryRunMode=False)
-  print(response)
+    response = parse_beam_yaml(example_yaml, isDryRunMode=False)
+    print(response)

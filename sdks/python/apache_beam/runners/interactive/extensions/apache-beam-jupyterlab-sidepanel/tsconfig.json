@@ -29,6 +29,7 @@
     "src/common/*",
     "src/kernel/*",
     "src/inspector/*",
-    "src/__tests__/**/*"
+    "src/__tests__/**/*",
+    "src/yaml/*"
   ]
 }
